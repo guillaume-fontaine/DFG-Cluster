@@ -3,7 +3,7 @@ import string
 import json
 import os
 from typing import Set
-from config import N, VAULT_FILE
+from config import N, GLOBAL_VAULT_FILE as VAULT_FILE
 
 class RIDManager:
     _vault: Set[str] = set()

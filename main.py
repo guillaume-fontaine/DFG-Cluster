@@ -4,6 +4,8 @@ import sys
 import time
 import os
 import shutil
+import random
+import multiprocessing
 from typing import List, Set
 from config import CLUSTER_ROOT, ORCHESTRATOR_NODE, USER_NODES, COMPUTE_NODES, LEDGER_DIR
 from models.operation_node import OperationNode
@@ -41,9 +43,9 @@ def identify_initial_sources(transactions: List[OperationNode]) -> Set[str]:
     return initial_sources
 
 def main():
-    setup_environment()
+    #setup_environment()
     
-    json_file = "ma_simulation.json"
+    json_file = "transactions.json"
     if len(sys.argv) > 1:
         json_file = sys.argv[1]
         
@@ -55,18 +57,26 @@ def main():
     log(f"Identified {len(initial_sources)} initial source files.")
     
     # Initialize Network
-    network = Network()
+    manager = multiprocessing.Manager()
+    queues = manager.dict()
+    lock = manager.Lock()
+    network = Network(queues, lock)
     
     # Initialize Nodes
     # Orchestrator
-    orchestrator = OrchestratorNode(ORCHESTRATOR_NODE, network, COMPUTE_NODES)
+    orch_queue = manager.Queue()
+    orchestrator = OrchestratorNode(ORCHESTRATOR_NODE, network, COMPUTE_NODES, orch_queue)
     
     # Workers
-    workers = [ComputeNode(node_id, network) for node_id in COMPUTE_NODES]
+    workers = []
+    for node_id in COMPUTE_NODES:
+        q = manager.Queue()
+        workers.append(ComputeNode(node_id, network, q))
     
     # User (assuming U01 for now)
     user_node_id = USER_NODES[0]
-    user = UserNode(user_node_id, network)
+    user_queue = manager.Queue()
+    user = UserNode(user_node_id, network, user_queue)
     
     # Start all processes
     orchestrator.start()
@@ -80,9 +90,9 @@ def main():
     # Pre-populate User storage with initial sources
     log(f"Populating {user_node_id} storage with initial sources...")
     for rid in initial_sources:
-        # Create dummy content
-        content = f"Initial content for {rid}"
-        user.storage.save_file(rid, content)
+        # Create random integer content
+        val = random.randint(1, 100)
+        user.storage.save_file(rid, str(val))
         
     # Submit Job
     log("Submitting job...")
@@ -124,7 +134,7 @@ def main():
         if completed_count >= total_tx:
             break
             
-        if time.time() - start_time > 300: # 5 min timeout
+        if time.time() - start_time > 10: # 5 min timeout
             log("Timeout waiting for completion.")
             break
             

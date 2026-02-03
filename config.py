@@ -20,3 +20,6 @@ MACHINE_TMP_DIR_NAME = "tmp" # Each machine will have its own /tmp within its ro
 
 # Global ledger for the orchestrator
 LEDGER_DIR = "ledger"
+
+# Global vault for ID generation (used by generator script)
+GLOBAL_VAULT_FILE = "data/vault.json"

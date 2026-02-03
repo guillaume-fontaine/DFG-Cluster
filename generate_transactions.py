@@ -2,10 +2,22 @@
 import json
 import random
 import argparse
+import os
+import shutil
 from typing import List, Set
 from models.operation_node import FunctionType
 from utils.rid_manager import RIDManager
 from utils.storage_manager import StorageManager
+from config import CLUSTER_ROOT, USER_NODES, LEDGER_DIR
+
+
+def setup_environment():
+    if os.path.exists(CLUSTER_ROOT):
+        shutil.rmtree(CLUSTER_ROOT)
+    os.makedirs(CLUSTER_ROOT)
+    if os.path.exists(LEDGER_DIR):
+        shutil.rmtree(LEDGER_DIR)
+    os.makedirs(LEDGER_DIR)
 
 def generate_transactions(num_transactions: int, output_file: str):
     transactions = []
@@ -63,12 +75,17 @@ def generate_transactions(num_transactions: int, output_file: str):
 
     # 5. Identify primary sources and create files
     primary_sources = all_sources - all_destinations
-    print(f"Identified {len(primary_sources)} primary sources. Generating files...")
+    print(f"Identified {len(primary_sources)} primary sources. Generating files in User Node storage...")
+    
+    # Setup storage for U01
+    user_node_id = USER_NODES[0]
+    user_root = os.path.join(CLUSTER_ROOT, user_node_id)
+    storage = StorageManager(user_root)
     
     for rid in primary_sources:
         # Generate random integer
         val = random.randint(1, 100)
-        StorageManager.save_file(rid, str(val))
+        storage.save_file(rid, str(val))
         # print(f"Created primary source {rid} with value {val}")
 
     # 6. Save transactions
@@ -83,4 +100,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default="transactions.json", help="Output JSON file")
     
     args = parser.parse_args()
+    setup_environment()
     generate_transactions(args.count, args.output)

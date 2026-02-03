@@ -11,10 +11,9 @@ class Message:
     payload: Any
 
 class Network:
-    def __init__(self):
-        self._manager = multiprocessing.Manager()
-        self._queues = self._manager.dict()
-        self._lock = self._manager.Lock()
+    def __init__(self, queues_dict, lock):
+        self._queues = queues_dict
+        self._lock = lock
 
     def register_node(self, node_id: str, queue: multiprocessing.Queue):
         with self._lock:

@@ -4,6 +4,7 @@ import time
 import sys
 import subprocess
 import shutil
+import queue
 from typing import List, Dict, Set, Any
 from config import CLUSTER_ROOT, MACHINE_TMP_DIR_NAME
 from utils.network import Network, Message
@@ -11,11 +12,11 @@ from utils.storage_manager import StorageManager
 from models.operation_node import OperationNode
 
 class Node(multiprocessing.Process):
-    def __init__(self, node_id: str, network: Network):
+    def __init__(self, node_id: str, network: Network, inbox: Any):
         super().__init__()
         self.node_id = node_id
         self.network = network
-        self.inbox = multiprocessing.Queue()
+        self.inbox = inbox
         self.root_dir = os.path.join(CLUSTER_ROOT, node_id)
         self.storage = StorageManager(self.root_dir)
         self.running = True
@@ -29,7 +30,7 @@ class Node(multiprocessing.Process):
             try:
                 msg = self.inbox.get(timeout=1)
                 self.process_message(msg)
-            except multiprocessing.queues.Empty:
+            except queue.Empty:
                 continue
             except Exception as e:
                 print(f"[{self.node_id}] Error: {e}")
@@ -103,7 +104,7 @@ class Node(multiprocessing.Process):
             try:
                 msg = self.inbox.get(timeout=0.1)
                 self.process_message(msg)
-            except multiprocessing.queues.Empty:
+            except queue.Empty:
                 pass
         return False
 
@@ -202,8 +203,8 @@ class UserNode(Node):
         self.network.send(Message(self.node_id, "M00", "SUBMIT_JOB", {"tasks": tasks_data}))
 
 class OrchestratorNode(Node):
-    def __init__(self, node_id: str, network: Network, workers: List[str]):
-        super().__init__(node_id, network)
+    def __init__(self, node_id: str, network: Network, workers: List[str], inbox: Any):
+        super().__init__(node_id, network, inbox)
         self.workers = workers
         self.rid_locations = {} # RID -> NodeID
         self.pending_tasks = {} # ID -> Task
