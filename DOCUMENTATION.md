@@ -71,18 +71,56 @@ Le fichier `config.py` définit les paramètres globaux :
 *   `TMP_DIR` : Répertoire racine pour les fichiers temporaires d'exécution.
 *   `VAULT_FILE` : Fichier utilisé par le générateur d'IDs.
 
-## Exécution
+## Technologies et Protocoles
 
-Le point d'entrée est `main.py`.
+### Langages Utilisés
+*   **Python 3** : Langage principal du projet. Utilisé pour l'orchestration, la gestion des processus et l'implémentation des scripts de calcul.
 
-Usage :
+### Protocoles et Communication
+*   **Multiprocessing (IPC)** : La communication entre le Maître et les Travailleurs se fait via des mécanismes de communication inter-processus (IPC) natifs de Python :
+    *   `multiprocessing.Queue` : Pour l'échange de messages (tâches et résultats).
+    *   `multiprocessing.Lock` : Pour la synchronisation de l'accès aux ressources partagées (fichiers).
+*   **Système de Fichiers** : Utilisé comme moyen de persistance et d'échange de données volumineuses (les fichiers eux-mêmes ne passent pas par les files d'attente, seuls leurs identifiants y transitent).
+
+### Formats de Données
+*   **JSON (JavaScript Object Notation)** :
+    *   **Transactions** : Le fichier d'entrée décrivant le DAG est au format JSON.
+    *   **Registre** : Le mappage RID -> Hash est stocké en JSON.
+    *   **Ledger** : Les rapports d'exécution sont stockés individuellement en JSON.
+*   **Fichiers Bruts** : Les données traitées par les scripts (contenu des fichiers) sont stockées sous forme de fichiers bruts, identifiés par leur hash SHA-1 (Content Addressable Storage).
+
+## Guide de Démarrage
+
+### Prérequis
+*   Python 3.8 ou supérieur.
+*   Un système d'exploitation compatible POSIX (Linux/macOS) est recommandé pour la gestion des processus, bien que cela fonctionne sous Windows.
+
+### Lancement du Projet
+
+Le point d'entrée principal est le script `main.py`. Il attend en argument le chemin vers un fichier JSON contenant la liste des transactions à exécuter.
+
+**Commande :**
 ```bash
-./main.py transactions.json
+python3 main.py <chemin_vers_transactions.json>
 ```
 
-Le script :
-1.  Charge les transactions.
-2.  Lance le cluster (Master + 3 Workers).
-3.  Exécute le DAG.
-4.  Vérifie à la fin que tous les fichiers de destination existent.
+**Exemple :**
+```bash
+python3 main.py transactions.json
+```
 
+**Déroulement :**
+1.  Le script charge et valide le fichier JSON.
+2.  Il initialise le cluster avec 3 processus travailleurs (Workers).
+3.  Il lance l'exécution du graphe de dépendances (DAG).
+4.  Une fois terminé, il vérifie la présence des fichiers de sortie et affiche un rapport.
+
+## Glossaire
+
+*   **DAG (Directed Acyclic Graph)** : Graphe Acyclique Dirigé. Structure de données utilisée pour représenter les dépendances entre les tâches. Chaque tâche est un nœud, et une dépendance est une arête dirigée.
+*   **RID (Resource ID)** : Identifiant unique d'une ressource (fichier) dans le système. Il permet de référencer un fichier sans connaître son contenu exact à l'avance.
+*   **CAS (Content Addressable Storage)** : Méthode de stockage où les données sont récupérées en utilisant leur contenu (hash) plutôt que leur emplacement.
+*   **Worker** : Processus esclave chargé d'exécuter une unité de travail (tâche) de manière isolée.
+*   **Master** : Processus maître chargé de la coordination et de la distribution du travail.
+*   **Ledger** : Registre immuable (dans le contexte de ce projet, un dossier de logs) enregistrant l'historique et le résultat de chaque transaction exécutée.
+*   **IPC (Inter-Process Communication)** : Mécanismes permettant à des processus distincts de communiquer et de se synchroniser (ici, Queues et Locks).
