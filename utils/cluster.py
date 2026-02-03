@@ -28,7 +28,7 @@ class ClusterWorker(multiprocessing.Process):
                 break
             
             # Execute task
-            # log(f"Executing task {task.id}", self.name)
+            log(f"Executing task {task.id}", self.name)
             result = WorkerExecutor.execute(task, lock=self.registry_lock)
             
             if result:
@@ -36,12 +36,10 @@ class ClusterWorker(multiprocessing.Process):
                     StorageManager.save_ledger_entry(task.id, result)
                 
                 # Notify master of completion
-                self.result_queue.put(task.id)
+                self.result_queue.put((task.id, True))
             else:
-                # Even if failed, we should probably notify so master doesn't wait forever?
-                # For now, let's assume failure means we can't proceed with dependents.
-                # But we should probably signal failure.
-                self.result_queue.put(None)
+                # Notify master of failure
+                self.result_queue.put((task.id, False))
 
 class ClusterMaster:
     def __init__(self, num_workers=3):
@@ -60,79 +58,7 @@ class ClusterMaster:
             worker.start()
             self.workers.append(worker)
 
-    def process_tasks(self, tasks: List[OperationNode]):
-        """
-        Manages the execution of tasks respecting dependencies.
-        """
-        pending_tasks = {t.id: t for t in tasks}
-        completed_tasks = set()
-        
-        # Map: RID -> Transaction ID that produces it
-        # This helps to know which transaction must finish before another can start.
-        # However, the dependency is on the *source files* (RIDs).
-        # We need to know if the source RIDs exist.
-        # But since we are generating them, we know which transaction produces which RID.
-        
-        # Build a dependency graph: Task ID -> Set of Task IDs it depends on
-        task_dependencies: Dict[str, Set[str]] = {}
-        
-        # Map: RID -> Task ID that produces it
-        rid_producer: Dict[str, str] = {}
-        for t in tasks:
-            for dest in t.destination:
-                rid_producer[dest] = t.id
-                
-        for t in tasks:
-            deps = set()
-            for src in t.sources:
-                if src in rid_producer:
-                    deps.add(rid_producer[src])
-            task_dependencies[t.id] = deps
-
-        # Queue of tasks ready to run
-        ready_queue = []
-        
-        # Find initially ready tasks
-        for t_id, deps in task_dependencies.items():
-            if not deps:
-                ready_queue.append(pending_tasks[t_id])
-        
-        # Submit initial tasks
-        for t in ready_queue:
-            self.task_queue.put(t)
-            
-        # Loop until all tasks are done
-        tasks_remaining = len(tasks)
-        while tasks_remaining > 0:
-            # Wait for a completion signal
-            completed_tid = self.result_queue.get()
-            
-            if completed_tid:
-                completed_tasks.add(completed_tid)
-                tasks_remaining -= 1
-                
-                # Check if new tasks are ready
-                # We iterate over pending tasks that are not yet completed and not yet submitted?
-                # Actually, we need to track which ones are submitted.
-                # Let's refine the state tracking.
-                
-                # Instead of iterating all, let's just check dependencies.
-                # Optimization: Reverse dependency map (Task -> Dependents) would be better,
-                # but for N=50 it's fine to iterate.
-                
-                for t_id, deps in task_dependencies.items():
-                    if t_id in completed_tasks:
-                        continue
-                    
-                    # If this task was already submitted, skip
-                    # We need a set of submitted tasks
-                    # Let's use a separate set for submitted
-                    pass 
-
-        # Re-implementing the loop with better state tracking
-        pass
-
-    def run_dag(self, tasks: List[OperationNode]):
+    def run_dag(self, tasks: List[OperationNode], enable_retry: bool = False):
         """
         Executes tasks respecting dependencies.
         """
@@ -166,7 +92,10 @@ class ClusterMaster:
         # 2. Initialize Ready Queue
         submitted_tasks = set()
         completed_tasks = set()
+        failed_tasks = set()
+        retry_counts = {t.id: 0 for t in tasks}
         total_tasks = len(tasks)
+        processed_count = 0
         
         # Find tasks with 0 dependencies
         for t in tasks:
@@ -175,42 +104,57 @@ class ClusterMaster:
                 submitted_tasks.add(t.id)
         
         # 3. Event Loop
-        while len(completed_tasks) < total_tasks:
+        while processed_count < total_tasks:
             # Wait for any worker to finish
-            finished_tid = self.result_queue.get()
+            result_data = self.result_queue.get()
             
-            if finished_tid is None:
-                # A task failed. What to do? 
-                # For now, we just ignore it or log it. 
-                # But we still need to decrement total_tasks or handle it to avoid infinite loop.
-                # Let's assume we just count it as "processed" but don't unlock dependents.
-                # Or better, just break/raise error.
-                log("A task failed execution.")
-                # If we break, we leave the process hanging.
-                # Let's just count it as completed for the loop, but dependents won't run.
-                # Actually, if we don't add it to completed_tasks, we loop forever.
-                # If we add it, dependents might fail due to missing files.
-                # Let's just continue.
-                total_tasks -= 1 # Reduce expectation
+            if result_data is None:
+                # Should not happen with updated worker, but handle gracefully
                 continue
 
-            completed_tasks.add(finished_tid)
+            tid, success = result_data
             
-            # Check dependents
-            for dependent_id in task_dependents[finished_tid]:
-                if dependent_id in submitted_tasks:
-                    continue
+            if success:
+                completed_tasks.add(tid)
+                processed_count += 1
                 
-                # Remove the satisfied dependency
-                task_deps[dependent_id].discard(finished_tid)
-                
-                # If no more dependencies, submit
-                if not task_deps[dependent_id]:
-                    # Find the task object
-                    task_obj = next(t for t in tasks if t.id == dependent_id)
-                    log(f"DEBUG: Dependencies satisfied for {dependent_id}. Submitting.")
+                # Check dependents
+                for dependent_id in task_dependents[tid]:
+                    if dependent_id in submitted_tasks or dependent_id in failed_tasks:
+                        continue
+                    
+                    # Remove the satisfied dependency
+                    task_deps[dependent_id].discard(tid)
+                    
+                    # If no more dependencies, submit
+                    if not task_deps[dependent_id]:
+                        # Find the task object
+                        task_obj = next(t for t in tasks if t.id == dependent_id)
+                        log(f"DEBUG: Dependencies satisfied for {dependent_id}. Submitting.")
+                        self.task_queue.put(task_obj)
+                        submitted_tasks.add(dependent_id)
+            else:
+                # Task failed
+                if enable_retry and retry_counts[tid] < 1:
+                    log(f"Task {tid} failed. Retrying...")
+                    retry_counts[tid] += 1
+                    task_obj = next(t for t in tasks if t.id == tid)
                     self.task_queue.put(task_obj)
-                    submitted_tasks.add(dependent_id)
+                else:
+                    log(f"Task {tid} failed permanently.")
+                    failed_tasks.add(tid)
+                    processed_count += 1
+                    
+                    # Cascade failure to dependents
+                    queue = [tid]
+                    while queue:
+                        curr = queue.pop(0)
+                        for dep in task_dependents[curr]:
+                            if dep not in failed_tasks and dep not in completed_tasks:
+                                log(f"Task {dep} failed due to dependency {curr} failure.")
+                                failed_tasks.add(dep)
+                                processed_count += 1
+                                queue.append(dep)
 
     def stop(self):
         # Send sentinel values to stop workers

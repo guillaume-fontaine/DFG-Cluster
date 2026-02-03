@@ -68,7 +68,7 @@ def main():
         
         # Use run_dag to handle dependencies
         log(f"Executing {len(transactions)} transactions respecting dependencies...")
-        master.run_dag(transactions)
+        master.run_dag(transactions, True)
 
         log("Waiting for transactions to complete...")
         master.stop()
