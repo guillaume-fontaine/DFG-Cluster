@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import List
 
@@ -22,3 +22,9 @@ class OperationNode:
             sources=data["sources"],
             destination=data["destination"]
         )
+        
+    def to_dict(self):
+        # Convert enum to string value
+        d = asdict(self)
+        d['function'] = self.function.value
+        return d

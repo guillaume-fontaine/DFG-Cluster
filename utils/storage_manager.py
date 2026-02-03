@@ -2,112 +2,101 @@ import hashlib
 import json
 import os
 from typing import Dict, Optional
-from config import STORE_DIR, REGISTRY_FILE, LEDGER_DIR
+from config import MACHINE_STORE_DIR_NAME, MACHINE_REGISTRY_FILE_NAME, LEDGER_DIR
 
 def log(message):
     print(f"[storage_manager.py] {message}")
 
 class StorageManager:
-    _registry: Dict[str, str] = {}
+    def __init__(self, machine_root: str):
+        self.machine_root = machine_root
+        self.store_dir = os.path.join(machine_root, MACHINE_STORE_DIR_NAME)
+        self.registry_file = os.path.join(machine_root, MACHINE_REGISTRY_FILE_NAME)
+        self._registry: Dict[str, str] = {}
+        self._ensure_dirs()
 
-    @classmethod
-    def _load_registry(cls):
-        if os.path.exists(REGISTRY_FILE):
+    def _ensure_dirs(self):
+        os.makedirs(self.store_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(self.registry_file), exist_ok=True)
+
+    def _load_registry(self):
+        if os.path.exists(self.registry_file):
             try:
-                with open(REGISTRY_FILE, 'r') as f:
-                    cls._registry = json.load(f)
+                with open(self.registry_file, 'r') as f:
+                    self._registry = json.load(f)
             except json.JSONDecodeError:
-                cls._registry = {}
+                self._registry = {}
         else:
-            cls._registry = {}
+            self._registry = {}
 
-    @classmethod
-    def _save_registry(cls):
-        os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
-        with open(REGISTRY_FILE, 'w') as f:
-            json.dump(cls._registry, f)
+    def _save_registry(self):
+        with open(self.registry_file, 'w') as f:
+            json.dump(self._registry, f)
 
-    @classmethod
-    def _calculate_hash(cls, content: str) -> str:
+    def _calculate_hash(self, content: str) -> str:
         return hashlib.sha1(content.encode('utf-8')).hexdigest()
 
-    @classmethod
-    def save_file(cls, rid: str, content: str, lock=None) -> str:
+    def save_file(self, rid: str, content: str) -> str:
         """
-        Saves content to the store using its hash as the filename.
-        Updates the registry mapping RID -> Hash.
-        Returns the hash of the content.
-        Thread/Process safe if lock is provided.
+        Saves content to the machine's store.
         """
-        file_hash = cls._calculate_hash(content)
+        file_hash = self._calculate_hash(content)
+        file_path = os.path.join(self.store_dir, file_hash)
         
-        # Save the physical file if it doesn't exist
-        os.makedirs(STORE_DIR, exist_ok=True)
-        file_path = os.path.join(STORE_DIR, file_hash)
-        
-        # Writing the file itself is usually atomic or safe enough if we don't interleave writes to same file
-        # Since hash is content-based, multiple writers writing same content to same file is fine.
         if not os.path.exists(file_path):
             with open(file_path, 'w') as f:
                 f.write(content)
         
-        # Update registry - Critical Section
-        if lock:
-            with lock:
-                cls._update_registry(rid, file_hash)
-        else:
-            cls._update_registry(rid, file_hash)
-        
+        self._update_registry(rid, file_hash)
         return file_hash
 
-    @classmethod
-    def _update_registry(cls, rid: str, file_hash: str):
-        cls._load_registry()
-        cls._registry[rid] = file_hash
-        cls._save_registry()
+    def _update_registry(self, rid: str, file_hash: str):
+        self._load_registry()
+        self._registry[rid] = file_hash
+        self._save_registry()
 
-    @classmethod
-    def get_file_content(cls, rid: str) -> str:
-        """
-        Retrieves content associated with a RID.
-        """
-        # Reading registry might need lock if it's being written to?
-        # For simplicity, we reload registry every time or assume it's fine.
-        # But to be safe, we should probably lock read too if we want strict consistency.
-        # However, usually we just need to find the hash.
-        
-        # Let's just reload to be sure we have latest
-        cls._load_registry()
-            
-        file_hash = cls._registry.get(rid)
+    def get_file_content(self, rid: str) -> str:
+        self._load_registry()
+        file_hash = self._registry.get(rid)
         if not file_hash:
-            # log(f"No file found for RID: {rid}")
-            raise FileNotFoundError(f"No file found for RID: {rid}")
+            raise FileNotFoundError(f"No file found for RID: {rid} in {self.machine_root}")
             
-        file_path = os.path.join(STORE_DIR, file_hash)
+        file_path = os.path.join(self.store_dir, file_hash)
         if not os.path.exists(file_path):
-             # log(f"Physical file missing for hash: {file_hash}")
-             raise FileNotFoundError(f"Physical file missing for hash: {file_hash}")
+             raise FileNotFoundError(f"Physical file missing for hash: {file_hash} in {self.store_dir}")
              
         with open(file_path, 'r') as f:
             return f.read()
 
-    @classmethod
-    def get_hash(cls, rid: str) -> str:
-        cls._load_registry()
-        return cls._registry.get(rid)
+    def has_file(self, rid: str) -> bool:
+        self._load_registry()
+        return rid in self._registry
 
-    @classmethod
-    def save_ledger_entry(cls, transaction_rid: str, entry_data: dict, lock=None):
+    def get_hash(self, rid: str) -> str:
+        self._load_registry()
+        return self._registry.get(rid)
+
+    @staticmethod
+    def save_ledger_entry(transaction_id: str, entry_data: dict):
         """
-        Saves a transaction record to the ledger.
+        Appends a record to the transaction's ledger file.
         """
         os.makedirs(LEDGER_DIR, exist_ok=True)
-        file_path = os.path.join(LEDGER_DIR, f"{transaction_rid}.json")
+        file_path = os.path.join(LEDGER_DIR, f"{transaction_id}.json")
         
-        # Writing a new file for a unique transaction RID shouldn't conflict with others
-        # But if we want to be safe or if we append to a global log, we need a lock.
-        # Here we write individual files.
+        existing_data = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    content = json.load(f)
+                    if isinstance(content, list):
+                        existing_data = content
+                    else:
+                        existing_data = [content]
+            except:
+                pass
+        
+        existing_data.append(entry_data)
         
         with open(file_path, 'w') as f:
-            json.dump(entry_data, f, indent=4)
+            json.dump(existing_data, f, indent=4)

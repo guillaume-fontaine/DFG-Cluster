@@ -1,14 +1,14 @@
-import os
-import shutil
 import multiprocessing
+import os
 import time
 import sys
 import subprocess
-from typing import List, Dict, Any
-from config import CLUSTER_ROOT
+import shutil
+from typing import List, Dict, Set, Any
+from config import CLUSTER_ROOT, MACHINE_TMP_DIR_NAME
 from utils.network import Network, Message
+from utils.storage_manager import StorageManager
 from models.operation_node import OperationNode
-from utils.rid_manager import RIDManager
 
 class Node(multiprocessing.Process):
     def __init__(self, node_id: str, network: Network):
@@ -17,25 +17,18 @@ class Node(multiprocessing.Process):
         self.network = network
         self.inbox = multiprocessing.Queue()
         self.root_dir = os.path.join(CLUSTER_ROOT, node_id)
-        self.tmp_dir = os.path.join(self.root_dir, "tmp")
+        self.storage = StorageManager(self.root_dir)
         self.running = True
-
-    def setup_fs(self):
-        if os.path.exists(self.root_dir):
-            shutil.rmtree(self.root_dir)
-        os.makedirs(self.root_dir)
-        os.makedirs(self.tmp_dir)
-        
-        # Register to network
-        self.network.register_node(self.node_id, self.inbox)
+        self.deferred_messages = [] # For messages that arrive out of order (e.g. file before request)
 
     def run(self):
-        self.setup_fs()
-        print(f"[{self.node_id}] Started. Root: {self.root_dir}")
+        self.network.register_node(self.node_id, self.inbox)
+        print(f"[{self.node_id}] Online.")
+        
         while self.running:
             try:
                 msg = self.inbox.get(timeout=1)
-                self.handle_message(msg)
+                self.process_message(msg)
             except multiprocessing.queues.Empty:
                 continue
             except Exception as e:
@@ -43,181 +36,281 @@ class Node(multiprocessing.Process):
                 import traceback
                 traceback.print_exc()
 
-    def handle_message(self, msg: Message):
+    def process_message(self, msg: Message):
         if msg.type == "STOP":
             self.running = False
+        elif msg.type == "REQUEST_FILE":
+            self.handle_request_file(msg)
+        elif msg.type == "FILE_TRANSFER":
+            self.handle_file_transfer(msg)
         else:
-            print(f"[{self.node_id}] Unhandled message: {msg.type}")
+            self.handle_custom_message(msg)
 
-    def send(self, receiver: str, type: str, payload: Any):
-        msg = Message(self.node_id, receiver, type, payload)
-        self.network.send(msg)
+    def handle_custom_message(self, msg: Message):
+        pass
 
-class StorageNode(Node):
-    def __init__(self, node_id: str, network: Network):
-        super().__init__(node_id, network)
-        self.store_dir = os.path.join(self.root_dir, "store")
-        self.registry = {} 
+    def handle_request_file(self, msg: Message):
+        rid = msg.payload["rid"]
+        requester = msg.sender
+        # print(f"[{self.node_id}] Received request for {rid} from {requester}")
+        try:
+            content = self.storage.get_file_content(rid)
+            self.send_file(requester, rid, content)
+        except FileNotFoundError:
+            print(f"[{self.node_id}] Requested file {rid} not found.")
+            # Optionally send ERROR message
 
-    def setup_fs(self):
-        super().setup_fs()
-        os.makedirs(self.store_dir)
-
-    def handle_message(self, msg: Message):
-        if msg.type == "STOP":
-            self.running = False
-        elif msg.type == "STORE_FILE":
-            rid = msg.payload["rid"]
-            content = msg.payload["content"]
-            self._save_file(rid, content)
-        elif msg.type == "GET_FILE":
-            rid = msg.payload["rid"]
-            content = self._get_file(rid)
-            self.send(msg.sender, "FILE_CONTENT", {"rid": rid, "content": content})
-
-    def _save_file(self, rid, content):
-        import hashlib
-        h = hashlib.sha1(content.encode('utf-8')).hexdigest()
-        path = os.path.join(self.store_dir, h)
-        if not os.path.exists(path):
-            with open(path, 'w') as f:
-                f.write(content)
-        self.registry[rid] = h
+    def handle_file_transfer(self, msg: Message):
+        rid = msg.payload["rid"]
+        content = msg.payload["content"]
+        # print(f"[{self.node_id}] Received file {rid} from {msg.sender}")
+        self.storage.save_file(rid, content)
         
-    def _get_file(self, rid):
-        h = self.registry.get(rid)
-        if not h:
-            return None
-        path = os.path.join(self.store_dir, h)
-        if os.path.exists(path):
-            with open(path, 'r') as f:
-                return f.read()
-        return None
+        # Log to ledger
+        StorageManager.save_ledger_entry(f"transfer_{rid}", {
+            "event": "transfer_receive",
+            "rid": rid,
+            "receiver": self.node_id,
+            "sender": msg.sender,
+            "timestamp": time.time()
+        })
+
+    def send_file(self, target: str, rid: str, content: str):
+        payload = {"rid": rid, "content": content}
+        self.network.send(Message(self.node_id, target, "FILE_TRANSFER", payload))
+        
+        StorageManager.save_ledger_entry(f"transfer_{rid}", {
+            "event": "transfer_send",
+            "rid": rid,
+            "sender": self.node_id,
+            "receiver": target,
+            "timestamp": time.time()
+        })
+
+    def request_file(self, target: str, rid: str):
+        self.network.send(Message(self.node_id, target, "REQUEST_FILE", {"rid": rid}))
+
+    def wait_for_file(self, rid: str, timeout=10) -> bool:
+        """
+        Waits until file appears in local storage.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.storage.has_file(rid):
+                return True
+            
+            # Process incoming messages while waiting
+            try:
+                msg = self.inbox.get(timeout=0.1)
+                self.process_message(msg)
+            except multiprocessing.queues.Empty:
+                pass
+        return False
 
 class ComputeNode(Node):
-    def __init__(self, node_id: str, network: Network):
-        super().__init__(node_id, network)
-        self.deferred_messages = []
+    def handle_custom_message(self, msg: Message):
+        if msg.type == "EXECUTE_TASK":
+            self.execute_task(msg.payload)
 
-    def handle_message(self, msg: Message):
-        if msg.type == "STOP":
-            self.running = False
-        elif msg.type == "EXECUTE_TASK":
-            node = msg.payload
-            self._execute_task(node)
-        else:
-            # Store unexpected messages if we are not waiting (though here we are in main loop)
-            # Actually, if we are in main loop, we shouldn't get FILE_CONTENT unless we asked.
-            # But if we did ask, we are in _wait_for_file loop.
-            # So if we are here, it's a stray message or out of order.
-            pass
-
-    def _execute_task(self, node: OperationNode):
-        print(f"[{self.node_id}] Executing task {node.id} ({node.function.value})")
+    def execute_task(self, payload: Dict):
+        task = payload["task"] # OperationNode dict or obj
+        sources_map = payload["sources_loc"] # {rid: node_id}
         
-        # 1. Request sources
-        src_contents = {}
-        for src_rid in node.sources:
-            self.send("S00", "GET_FILE", {"rid": src_rid})
-            content = self._wait_for_file(src_rid)
-            if content is None:
-                print(f"[{self.node_id}] Failed to get source {src_rid}")
-                return
-            src_contents[src_rid] = content
+        # Convert dict to obj if needed
+        if isinstance(task, dict):
+            task = OperationNode.from_dict(task)
 
-        # 2. Prepare local environment
-        task_dir = os.path.join(self.tmp_dir, node.id)
-        os.makedirs(task_dir, exist_ok=True)
-        
-        src_paths = []
-        for src_rid, content in src_contents.items():
-            p = os.path.join(task_dir, src_rid)
-            with open(p, 'w') as f:
-                f.write(content)
-            src_paths.append(p)
-            
-        dest_paths = []
-        for dest_rid in node.destination:
-            dest_paths.append(os.path.join(task_dir, dest_rid))
+        print(f"[{self.node_id}] Executing task {task.id}")
 
-        # 3. Execute Script
-        script_name = node.function.value.lower() + ".py"
-        script_path = os.path.abspath(os.path.join("scripts", script_name))
-        
-        cmd = [sys.executable, script_path] + src_paths + ["-"] + dest_paths
+        # 1. Fetch missing sources
+        for src in task.sources:
+            if not self.storage.has_file(src):
+                source_node = sources_map.get(src)
+                if source_node:
+                    # print(f"[{self.node_id}] Fetching {src} from {source_node}")
+                    self.request_file(source_node, src)
+                    if not self.wait_for_file(src):
+                        print(f"[{self.node_id}] Failed to fetch {src}")
+                        self.network.send(Message(self.node_id, "M00", "TASK_FAILED", {"task_id": task.id}))
+                        return
+                else:
+                    print(f"[{self.node_id}] Unknown location for source {src}")
+                    self.network.send(Message(self.node_id, "M00", "TASK_FAILED", {"task_id": task.id}))
+                    return
+
+        # 2. Execute
+        # Create isolated tmp dir
+        task_tmp = os.path.join(self.root_dir, MACHINE_TMP_DIR_NAME, task.id)
+        os.makedirs(task_tmp, exist_ok=True)
         
         try:
+            # Copy sources to tmp
+            src_paths = []
+            for src in task.sources:
+                content = self.storage.get_file_content(src)
+                p = os.path.join(task_tmp, src)
+                with open(p, 'w') as f:
+                    f.write(content)
+                src_paths.append(p)
+            
+            dest_paths = [os.path.join(task_tmp, d) for d in task.destination]
+            
+            # Run script
+            script_name = task.function.value.lower() + ".py"
+            script_path = os.path.abspath(os.path.join("scripts", script_name))
+            
+            cmd = [sys.executable, script_path] + src_paths + ["-"] + dest_paths
             subprocess.run(cmd, check=True)
+            
+            # Collect results
+            produced_rids = []
+            for i, dest in enumerate(task.destination):
+                p = dest_paths[i]
+                if os.path.exists(p):
+                    with open(p, 'r') as f:
+                        content = f.read()
+                    self.storage.save_file(dest, content)
+                    produced_rids.append(dest)
+            
+            # Log execution to ledger
+            StorageManager.save_ledger_entry(task.id, {
+                "event": "task_executed",
+                "task_id": task.id,
+                "node": self.node_id,
+                "produced": produced_rids,
+                "timestamp": time.time()
+            })
+            
+            # Notify M00
+            self.network.send(Message(self.node_id, "M00", "TASK_COMPLETED", {
+                "task_id": task.id,
+                "produced": produced_rids
+            }))
+            
         except Exception as e:
-            print(f"[{self.node_id}] Execution failed: {e}")
-            return
+            print(f"[{self.node_id}] Execution error: {e}")
+            self.network.send(Message(self.node_id, "M00", "TASK_FAILED", {"task_id": task.id}))
+        finally:
+            if os.path.exists(task_tmp):
+                shutil.rmtree(task_tmp)
 
-        # 4. Send results back
-        for i, dest_rid in enumerate(node.destination):
-            p = dest_paths[i]
-            if os.path.exists(p):
-                with open(p, 'r') as f:
-                    content = f.read()
-                self.send("S00", "STORE_FILE", {"rid": dest_rid, "content": content})
-        
-        self.send("M00", "TASK_COMPLETE", {"node_id": node.id})
-        
-        # Cleanup
-        shutil.rmtree(task_dir)
+class UserNode(Node):
+    def submit_job(self, transactions: List[OperationNode]):
+        # Send job
+        # Convert to dicts for serialization
+        tasks_data = [t.to_dict() for t in transactions]
+        self.network.send(Message(self.node_id, "M00", "SUBMIT_JOB", {"tasks": tasks_data}))
 
-    def _wait_for_file(self, rid):
-        # Check deferred first
-        for i, msg in enumerate(self.deferred_messages):
-            if msg.type == "FILE_CONTENT" and msg.payload["rid"] == rid:
-                self.deferred_messages.pop(i)
-                return msg.payload["content"]
-
-        while True:
-            try:
-                msg = self.inbox.get(timeout=5) # Timeout to avoid deadlocks
-                if msg.type == "FILE_CONTENT" and msg.payload["rid"] == rid:
-                    return msg.payload["content"]
-                elif msg.type == "STOP":
-                    self.running = False
-                    return None
-                else:
-                    self.deferred_messages.append(msg)
-            except multiprocessing.queues.Empty:
-                print(f"[{self.node_id}] Timeout waiting for file {rid}")
-                return None
-
-class SchedulerNode(Node):
+class OrchestratorNode(Node):
     def __init__(self, node_id: str, network: Network, workers: List[str]):
         super().__init__(node_id, network)
         self.workers = workers
+        self.rid_locations = {} # RID -> NodeID
+        self.pending_tasks = {} # ID -> Task
+        self.task_deps = {} # ID -> Set[ID]
+        self.task_dependents = {} # ID -> Set[ID]
         self.completed_tasks = set()
-        self.total_tasks = 0
+        self.submitted_tasks = set()
+        
+    def handle_custom_message(self, msg: Message):
+        if msg.type == "SUBMIT_JOB":
+            self.handle_submit_job(msg)
+        elif msg.type == "TASK_COMPLETED":
+            self.handle_task_completed(msg)
+        elif msg.type == "TASK_FAILED":
+            print(f"[{self.node_id}] Task {msg.payload['task_id']} failed on {msg.sender}")
 
-    def handle_message(self, msg: Message):
-        if msg.type == "STOP":
-            self.running = False
-        elif msg.type == "SUBMIT_GRAPH":
-            tasks = msg.payload
-            self.total_tasks += len(tasks)
-            print(f"[{self.node_id}] Received graph with {len(tasks)} tasks.")
-            for task in tasks:
-                self._schedule_task(task)
-        elif msg.type == "TASK_COMPLETE":
-            tid = msg.payload["node_id"]
-            self.completed_tasks.add(tid)
-            print(f"[{self.node_id}] Task {tid} complete. ({len(self.completed_tasks)}/{self.total_tasks})")
-            if len(self.completed_tasks) >= self.total_tasks and self.total_tasks > 0:
-                print(f"[{self.node_id}] All tasks complete.")
+    def handle_submit_job(self, msg: Message):
+        tasks_data = msg.payload["tasks"]
+        user_id = msg.sender
+        print(f"[{self.node_id}] Received job from {user_id} with {len(tasks_data)} tasks.")
+        
+        tasks = [OperationNode.from_dict(t) for t in tasks_data]
+        
+        # 1. Register initial sources as being at UserID
+        # We need to know which RIDs are "inputs" to the graph (not produced by any task)
+        produced_rids = set()
+        for t in tasks:
+            for d in t.destination:
+                produced_rids.add(d)
+        
+        for t in tasks:
+            for s in t.sources:
+                if s not in produced_rids:
+                    self.rid_locations[s] = user_id
+        
+        # 2. Build Dependency Graph
+        rid_producer = {}
+        for t in tasks:
+            for d in t.destination:
+                rid_producer[d] = t.id
+        
+        for t in tasks:
+            self.pending_tasks[t.id] = t
+            self.task_dependents[t.id] = set()
+            deps = set()
+            for s in t.sources:
+                if s in rid_producer:
+                    producer = rid_producer[s]
+                    deps.add(producer)
+                    if producer not in self.task_dependents:
+                        self.task_dependents[producer] = set()
+                    self.task_dependents[producer].add(t.id)
+            self.task_deps[t.id] = deps
+            
+        # 3. Schedule ready tasks
+        self.schedule_ready_tasks()
 
-    def _schedule_task(self, task: OperationNode):
+    def schedule_ready_tasks(self):
+        for tid, deps in self.task_deps.items():
+            if not deps and tid not in self.submitted_tasks and tid not in self.completed_tasks:
+                self.submit_task(tid)
+
+    def submit_task(self, tid: str):
+        task = self.pending_tasks[tid]
+        
+        # Select worker (Round Robin or Random)
         import random
         worker = random.choice(self.workers)
-        print(f"[{self.node_id}] Scheduling task {task.id} on {worker}")
-        self.send(worker, "EXECUTE_TASK", task)
+        
+        # Prepare source locations
+        sources_loc = {}
+        for s in task.sources:
+            if s in self.rid_locations:
+                sources_loc[s] = self.rid_locations[s]
+            else:
+                # Should not happen if graph is complete
+                print(f"[{self.node_id}] Warning: Unknown location for source {s}")
+        
+        payload = {
+            "task": task.to_dict(),
+            "sources_loc": sources_loc
+        }
+        
+        self.network.send(Message(self.node_id, worker, "EXECUTE_TASK", payload))
+        self.submitted_tasks.add(tid)
 
-class UserNode(Node):
-    def submit_graph(self, tasks: List[OperationNode]):
-        self.send("M00", "SUBMIT_GRAPH", tasks)
-    
-    def upload_file(self, rid, content):
-        self.send("S00", "STORE_FILE", {"rid": rid, "content": content})
+    def handle_task_completed(self, msg: Message):
+        tid = msg.payload["task_id"]
+        produced = msg.payload["produced"]
+        worker = msg.sender
+        
+        print(f"[{self.node_id}] Task {tid} completed by {worker}")
+        
+        # Update locations
+        for rid in produced:
+            self.rid_locations[rid] = worker
+            
+        self.completed_tasks.add(tid)
+        
+        # Check dependents
+        if tid in self.task_dependents:
+            for dep_id in self.task_dependents[tid]:
+                self.task_deps[dep_id].discard(tid)
+        
+        self.schedule_ready_tasks()
+        
+        if len(self.completed_tasks) == len(self.pending_tasks):
+            print(f"[{self.node_id}] All tasks completed.")
+            # Optionally stop everyone?
+            # self.network.send(Message(self.node_id, "ALL", "STOP", None))

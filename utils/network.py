@@ -12,10 +12,9 @@ class Message:
 
 class Network:
     def __init__(self):
-        self._queues: Dict[str, multiprocessing.Queue] = {}
         self._manager = multiprocessing.Manager()
         self._queues = self._manager.dict()
-        self._lock = multiprocessing.Lock()
+        self._lock = self._manager.Lock()
 
     def register_node(self, node_id: str, queue: multiprocessing.Queue):
         with self._lock:
@@ -23,7 +22,6 @@ class Network:
 
     def send(self, message: Message):
         # Simulate latency based on payload size
-        # We can't easily measure object size, but let's approximate if it's bytes/str
         size = 0
         if isinstance(message.payload, (bytes, str)):
             size = len(message.payload)
@@ -33,12 +31,17 @@ class Network:
              if isinstance(content, (bytes, str)):
                  size = len(content)
         
-        # Latency: 0.001s per KB?
+        # Latency: 0.001s per KB
         latency = (size / 1024) * 0.001
         if latency > 0:
             time.sleep(latency)
             
-        if message.receiver in self._queues:
-            self._queues[message.receiver].put(message)
+        # We need to access _queues safely? 
+        # Manager dict is thread-safe for atomic operations, but let's just get the queue.
+        target_queue = self._queues.get(message.receiver)
+        
+        if target_queue:
+            target_queue.put(message)
         else:
-            print(f"Network Error: Node {message.receiver} not found.")
+            # print(f"Network Error: Node {message.receiver} not found.")
+            pass
