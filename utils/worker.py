@@ -11,9 +11,6 @@ class Worker:
     @staticmethod
     def execute(node: OperationNode):
         # 1. Prepare temporary directory
-        # We can use a subdirectory in TMP_DIR to avoid collisions if multiple workers run
-        # But the prompt says /tmp/[RID], so let's try to stick to that or similar.
-        # To be safe, let's use TMP_DIR/
         
         os.makedirs(TMP_DIR, exist_ok=True)
         

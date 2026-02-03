@@ -8,8 +8,10 @@ def read_content(filepath):
         return f.read()
 
 def write_content(filepath, value):
+    # Convertir la valeur hexadécimale en décimale
+    decimal_value = str(int(value, 16))
     with open(filepath, 'w') as f:
-        f.write(value)
+        f.write(decimal_value)
 
 def main():
     args = sys.argv[1:]
