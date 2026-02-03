@@ -21,7 +21,7 @@ class WorkerExecutor:
         
         src_paths = []
         src_hashes = {}
-        
+
         try:
             for src_rid in node.sources:
                 try:
@@ -29,7 +29,7 @@ class WorkerExecutor:
                     content = StorageManager.get_file_content(src_rid)
                     src_hash = StorageManager.get_hash(src_rid)
                     src_hashes[src_rid] = src_hash
-                    
+
                     # Write to /tmp/[TASK_ID]/[RID]
                     tmp_path = os.path.join(task_tmp_dir, src_rid)
                     with open(tmp_path, 'w') as f:
@@ -47,14 +47,14 @@ class WorkerExecutor:
             # 2. Determine script to run
             script_name = node.function.value.lower() + ".py"
             script_path = os.path.join(os.getcwd(), "scripts", script_name)
-            
+
             if not os.path.exists(script_path):
                 print(f"Error: Script {script_path} not found.")
                 return None
 
             # 3. Construct command
             cmd = [sys.executable, script_path] + src_paths + ["-"] + dest_paths
-            
+
             # 4. Execute
             start_time = time.time()
             try:
@@ -71,7 +71,7 @@ class WorkerExecutor:
                 if os.path.exists(tmp_path):
                     with open(tmp_path, 'r') as f:
                         content = f.read()
-                    
+
                     # Save to storage (hashes and updates registry)
                     # Pass the lock here!
                     file_hash = StorageManager.save_file(dest_rid, content, lock=lock)
@@ -88,7 +88,7 @@ class WorkerExecutor:
                 "timestamp_start": start_time,
                 "timestamp_end": end_time
             }
-            
+
         finally:
             # Clean up the entire task directory
             if os.path.exists(task_tmp_dir):

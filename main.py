@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+import json
+import sys
+from typing import List
 import time
 import os
 from models.operation_node import OperationNode, FunctionType
@@ -7,30 +11,45 @@ from utils.cluster import ClusterMaster
 from config import STORE_DIR, REGISTRY_FILE, LEDGER_DIR, VAULT_FILE
 
 
-def clear_data():
-    if os.path.exists(REGISTRY_FILE):
-        os.remove(REGISTRY_FILE)
-    if os.path.exists(VAULT_FILE):
-        os.remove(VAULT_FILE)
-    if os.path.exists(STORE_DIR):
-        for f in os.listdir(STORE_DIR):
-            os.remove(os.path.join(STORE_DIR, f))
-    if os.path.exists(LEDGER_DIR):
-        for f in os.listdir(LEDGER_DIR):
-            os.remove(os.path.join(LEDGER_DIR, f))
 
 
+def load_transactions_from_json(file_path: str) -> List[OperationNode]:
+    """
+    Loads a list of transactions from a JSON file and converts them to OperationNode objects.
+    """
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return [OperationNode.from_dict(item) for item in data]
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        return []
+    except json.JSONDecodeError:
+        print(f"Error: Failed to decode JSON from '{file_path}'.")
+        return []
 
 def main():
+    # Check if a JSON file is provided as argument
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.json'):
+        json_file = sys.argv[1]
+        print(f"Loading transactions from {json_file}...")
+        transactions = load_transactions_from_json(json_file)
 
-    clear_data()
+        if not transactions:
+            print("No transactions found or error loading file.")
+            return
 
+        for tx in transactions:
+            print(f"Executing transaction {tx.id} ({tx.function.value})")
+            Worker.execute(tx)
 
-    # 1. Setup
-    print("Setting up initial data...")
-    rid_1 = RIDManager.generate()
-    rid_2 = RIDManager.generate()
-    rid_3 = RIDManager.generate()
+        print("All transactions executed.")
+        return
+
+    # Default behavior (Demo)
+    # 1. Create initial files
+    rid_a = RIDManager.generate()
+    rid_b = RIDManager.generate()
     
     StorageManager.save_file(rid_1, "5")
     StorageManager.save_file(rid_2, "10")
@@ -51,7 +70,7 @@ def main():
         destination=[t1_dest1, t1_dest2]
     )
     tasks.append(task1)
-    
+
     # Task 2: MULT(rid_2, rid_3) -> dest3, dest4
     t2_dest1 = RIDManager.generate()
     t2_dest2 = RIDManager.generate()
@@ -62,7 +81,7 @@ def main():
         destination=[t2_dest1, t2_dest2]
     )
     tasks.append(task2)
-    
+
     # Task 3: HASH(rid_1, rid_3) -> dest5
     t3_dest1 = RIDManager.generate()
     task3 = OperationNode(
@@ -77,7 +96,7 @@ def main():
     print(f"Starting Cluster with 3 workers...")
     master = ClusterMaster(num_workers=3)
     master.start()
-    
+
     # 4. Submit Tasks
     print(f"Submitting {len(tasks)} tasks...")
     for task in tasks:
@@ -90,7 +109,7 @@ def main():
     
     # 6. Verify Results
     print("\n--- Verification ---")
-    
+
     # Task 1 Results (ADD 5, 10 -> 15, 30)
     try:
         res1 = StorageManager.get_file_content(t1_dest1)
