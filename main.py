@@ -4,8 +4,28 @@ from models.operation_node import OperationNode, FunctionType
 from utils.rid_manager import RIDManager
 from utils.storage_manager import StorageManager
 from utils.cluster import ClusterMaster
+from config import STORE_DIR, REGISTRY_FILE, LEDGER_DIR, VAULT_FILE
+
+
+def clear_data():
+    if os.path.exists(REGISTRY_FILE):
+        os.remove(REGISTRY_FILE)
+    if os.path.exists(VAULT_FILE):
+        os.remove(VAULT_FILE)
+    if os.path.exists(STORE_DIR):
+        for f in os.listdir(STORE_DIR):
+            os.remove(os.path.join(STORE_DIR, f))
+    if os.path.exists(LEDGER_DIR):
+        for f in os.listdir(LEDGER_DIR):
+            os.remove(os.path.join(LEDGER_DIR, f))
+
+
 
 def main():
+
+    clear_data()
+
+
     # 1. Setup
     print("Setting up initial data...")
     rid_1 = RIDManager.generate()
