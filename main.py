@@ -1,125 +1,80 @@
 import time
-import os
-from models.operation_node import OperationNode, FunctionType
+import multiprocessing
+from utils.network import Network
+from utils.nodes import StorageNode, SchedulerNode, ComputeNode, UserNode
 from utils.rid_manager import RIDManager
-from utils.storage_manager import StorageManager
-from utils.cluster import ClusterMaster
-from config import STORE_DIR, REGISTRY_FILE, LEDGER_DIR, VAULT_FILE
-
-
-def clear_data():
-    if os.path.exists(REGISTRY_FILE):
-        os.remove(REGISTRY_FILE)
-    if os.path.exists(VAULT_FILE):
-        os.remove(VAULT_FILE)
-    if os.path.exists(STORE_DIR):
-        for f in os.listdir(STORE_DIR):
-            os.remove(os.path.join(STORE_DIR, f))
-    if os.path.exists(LEDGER_DIR):
-        for f in os.listdir(LEDGER_DIR):
-            os.remove(os.path.join(LEDGER_DIR, f))
-
-
+from models.operation_node import OperationNode, FunctionType
 
 def main():
-
-    clear_data()
-
-
-    # 1. Setup
-    print("Setting up initial data...")
-    rid_1 = RIDManager.generate()
-    rid_2 = RIDManager.generate()
-    rid_3 = RIDManager.generate()
+    print("--- Starting Cluster Simulation ---")
     
-    StorageManager.save_file(rid_1, "5")
-    StorageManager.save_file(rid_2, "10")
-    StorageManager.save_file(rid_3, "2")
+    # 1. Initialize Network
+    network = Network()
     
-    print(f"Initial RIDs: {rid_1} (5), {rid_2} (10), {rid_3} (2)")
-
-    # 2. Create Tasks
-    tasks = []
+    # 2. Create Nodes
+    s00 = StorageNode("S00", network)
+    m00 = SchedulerNode("M00", network, workers=["M01", "M02", "M03"])
+    m01 = ComputeNode("M01", network)
+    m02 = ComputeNode("M02", network)
+    m03 = ComputeNode("M03", network)
+    u01 = UserNode("U01", network)
     
-    # Task 1: ADD(rid_1, rid_2) -> dest1, dest2
-    t1_dest1 = RIDManager.generate()
-    t1_dest2 = RIDManager.generate()
+    nodes = [s00, m00, m01, m02, m03, u01]
+    
+    # 3. Start Nodes
+    for node in nodes:
+        node.start()
+        
+    # Allow some time for startup
+    time.sleep(1)
+    
+    # 4. User U01 prepares data
+    print("\n[Main] U01 uploading initial data...")
+    rid_a = RIDManager.generate()
+    rid_b = RIDManager.generate()
+    
+    u01.upload_file(rid_a, "10")
+    u01.upload_file(rid_b, "20")
+    
+    # 5. User U01 submits graph
+    print("\n[Main] U01 submitting graph...")
+    
+    # Task 1: ADD(A, B) -> C, D
+    rid_c = RIDManager.generate()
+    rid_d = RIDManager.generate()
     task1 = OperationNode(
         id=RIDManager.generate(),
         function=FunctionType.ADD,
-        sources=[rid_1, rid_2],
-        destination=[t1_dest1, t1_dest2]
+        sources=[rid_a, rid_b],
+        destination=[rid_c, rid_d]
     )
-    tasks.append(task1)
     
-    # Task 2: MULT(rid_2, rid_3) -> dest3, dest4
-    t2_dest1 = RIDManager.generate()
-    t2_dest2 = RIDManager.generate()
+    # Task 2: MULT(C, D) -> E
+    rid_e = RIDManager.generate()
+    rid_f = RIDManager.generate() # Unused output
     task2 = OperationNode(
         id=RIDManager.generate(),
         function=FunctionType.MULT,
-        sources=[rid_2, rid_3],
-        destination=[t2_dest1, t2_dest2]
+        sources=[rid_c, rid_d],
+        destination=[rid_e, rid_f]
     )
-    tasks.append(task2)
     
-    # Task 3: HASH(rid_1, rid_3) -> dest5
-    t3_dest1 = RIDManager.generate()
-    task3 = OperationNode(
-        id=RIDManager.generate(),
-        function=FunctionType.HASH,
-        sources=[rid_1, rid_3],
-        destination=[t3_dest1]
-    )
-    tasks.append(task3)
-
-    # 3. Start Cluster
-    print(f"Starting Cluster with 3 workers...")
-    master = ClusterMaster(num_workers=3)
-    master.start()
+    u01.submit_graph([task1, task2])
     
-    # 4. Submit Tasks
-    print(f"Submitting {len(tasks)} tasks...")
-    for task in tasks:
-        master.submit_task(task)
+    # 6. Wait for completion (Simulated by waiting loop)
+    # In a real scenario, we'd have a callback or check status
+    print("\n[Main] Waiting for execution...")
+    time.sleep(10) # Give enough time for tasks to complete
     
-    # 5. Stop Cluster (waits for completion)
-    print("Waiting for tasks to complete...")
-    master.stop()
-    print("All tasks completed.")
-    
-    # 6. Verify Results
-    print("\n--- Verification ---")
-    
-    # Task 1 Results (ADD 5, 10 -> 15, 30)
-    try:
-        res1 = StorageManager.get_file_content(t1_dest1)
-        res2 = StorageManager.get_file_content(t1_dest2)
-        print(f"Task 1 (ADD): {res1}, {res2} (Expected: 15, 30)")
-    except Exception as e:
-        print(f"Task 1 failed: {e}")
-
-    # Task 2 Results (MULT 10, 2 -> 20, 400)
-    try:
-        res3 = StorageManager.get_file_content(t2_dest1)
-        res4 = StorageManager.get_file_content(t2_dest2)
-        print(f"Task 2 (MULT): {res3}, {res4} (Expected: 20, 400)")
-    except Exception as e:
-        print(f"Task 2 failed: {e}")
+    # 7. Stop Cluster
+    print("\n[Main] Stopping cluster...")
+    for node in nodes:
+        node.send(node.node_id, "STOP", None)
         
-    # Task 3 Results (HASH)
-    try:
-        res5 = StorageManager.get_file_content(t3_dest1)
-        print(f"Task 3 (HASH): {res5}")
-    except Exception as e:
-        print(f"Task 3 failed: {e}")
-
-    # Check Ledger
-    print("\n--- Ledger Check ---")
-    ledger_files = os.listdir("ledger")
-    print(f"Ledger entries found: {len(ledger_files)}")
-    for f in ledger_files:
-        print(f" - {f}")
+    for node in nodes:
+        node.join()
+        
+    print("--- Simulation Finished ---")
 
 if __name__ == '__main__':
     main()
