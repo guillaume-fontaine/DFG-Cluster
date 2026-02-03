@@ -201,6 +201,7 @@ class ClusterMaster:
                 if not task_deps[dependent_id]:
                     # Find the task object
                     task_obj = next(t for t in tasks if t.id == dependent_id)
+                    print(f"DEBUG: Dependencies satisfied for {dependent_id}. Submitting.")
                     self.task_queue.put(task_obj)
                     submitted_tasks.add(dependent_id)
 
