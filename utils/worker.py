@@ -2,26 +2,30 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import List
+import time
+from typing import List, Dict, Any
 from config import TMP_DIR
 from models.operation_node import OperationNode, FunctionType
 from utils.storage_manager import StorageManager
 
-class Worker:
+class WorkerExecutor:
     @staticmethod
-    def execute(node: OperationNode):
+    def execute(node: OperationNode, lock=None) -> Dict[str, Any]:
+        """
+        Executes the operation and returns details for the ledger.
+        """
         # 1. Prepare temporary directory
-        # We can use a subdirectory in TMP_DIR to avoid collisions if multiple workers run
-        # But the prompt says /tmp/[RID], so let's try to stick to that or similar.
-        # To be safe, let's use TMP_DIR/
-        
         os.makedirs(TMP_DIR, exist_ok=True)
         
         src_paths = []
+        src_hashes = {}
+        
         for src_rid in node.sources:
             try:
-                # Get content from storage
+                # Get content and hash from storage
                 content = StorageManager.get_file_content(src_rid)
+                src_hash = StorageManager.get_hash(src_rid)
+                src_hashes[src_rid] = src_hash
                 
                 # Write to /tmp/[RID]
                 tmp_path = os.path.join(TMP_DIR, src_rid)
@@ -30,7 +34,7 @@ class Worker:
                 src_paths.append(tmp_path)
             except FileNotFoundError:
                 print(f"Error: Source RID {src_rid} not found.")
-                return
+                return None
 
         dest_paths = []
         for dest_rid in node.destination:
@@ -43,20 +47,22 @@ class Worker:
         
         if not os.path.exists(script_path):
             print(f"Error: Script {script_path} not found.")
-            return
+            return None
 
         # 3. Construct command
-        # python script.py src1 src2 - dest1 dest2
         cmd = [sys.executable, script_path] + src_paths + ["-"] + dest_paths
         
         # 4. Execute
+        start_time = time.time()
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             print(f"Error executing script: {e}")
-            return
+            return None
+        end_time = time.time()
 
         # 5. Finalize: Save results to store
+        dest_hashes = {}
         for i, dest_rid in enumerate(node.destination):
             tmp_path = dest_paths[i]
             if os.path.exists(tmp_path):
@@ -64,7 +70,9 @@ class Worker:
                     content = f.read()
                 
                 # Save to storage (hashes and updates registry)
-                StorageManager.save_file(dest_rid, content)
+                # Pass the lock here!
+                file_hash = StorageManager.save_file(dest_rid, content, lock=lock)
+                dest_hashes[dest_rid] = file_hash
                 
                 # Clean up
                 os.remove(tmp_path)
@@ -75,3 +83,13 @@ class Worker:
         for src_path in src_paths:
             if os.path.exists(src_path):
                 os.remove(src_path)
+                
+        # Return ledger info
+        return {
+            "transaction_id": node.id,
+            "function": node.function.value,
+            "sources": src_hashes,
+            "destinations": dest_hashes,
+            "timestamp_start": start_time,
+            "timestamp_end": end_time
+        }
