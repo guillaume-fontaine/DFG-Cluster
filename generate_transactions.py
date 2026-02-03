@@ -2,85 +2,60 @@
 import json
 import random
 import argparse
-from typing import List, Set
 from models.operation_node import FunctionType
 from utils.rid_manager import RIDManager
 from utils.storage_manager import StorageManager
 
-def generate_transactions(num_transactions: int, output_file: str):
-    transactions = []
-    all_sources = set()
-    all_destinations = set()
-    
-    # Pool of RIDs that are outputs of previous transactions, available to be used as inputs
-    available_intermediate_results = []
 
-    print(f"Generating {num_transactions} transactions...")
+def generate_transactions(num_transactions_per_chain: int, num_parallel_chains: int, output_file: str):
+    if num_transactions_per_chain < 1 or num_parallel_chains < 1:
+        print("Le nombre de transactions et de chaînes doit être au moins de 1.")
+        return
 
-    for _ in range(num_transactions):
-        # 1. Determine function
-        func_type = random.choice(list(FunctionType))
-        
-        # 2. Determine sources
-        # We want some sources to be previous destinations.
-        num_sources = random.randint(1, 3)
-        current_sources = []
-        
-        for _ in range(num_sources):
-            use_intermediate = False
-            # 50% chance to use intermediate if available
-            if available_intermediate_results and random.random() > 0.5:
-                use_intermediate = True
-            
-            if use_intermediate:
-                rid = random.choice(available_intermediate_results)
-                current_sources.append(rid)
-            else:
-                # New primary source
-                rid = RIDManager.generate()
-                current_sources.append(rid)
-        
-        all_sources.update(current_sources)
-        
-        # 3. Determine destinations
-        num_dests = random.randint(1, 2)
-        current_dests = []
-        for _ in range(num_dests):
-            rid = RIDManager.generate()
-            current_dests.append(rid)
-        
-        all_destinations.update(current_dests)
-        available_intermediate_results.extend(current_dests)
-        
-        # 4. Create transaction
-        tx = {
-            "id": RIDManager.generate(),
-            "function": func_type.value,
-            "sources": current_sources,
-            "destination": current_dests
-        }
-        transactions.append(tx)
+    all_transactions = []
 
-    # 5. Identify primary sources and create files
-    primary_sources = all_sources - all_destinations
-    print(f"Identified {len(primary_sources)} primary sources. Generating files...")
-    
-    for rid in primary_sources:
-        # Generate random integer
-        val = random.randint(1, 100)
-        StorageManager.save_file(rid, str(val))
-        # print(f"Created primary source {rid} with value {val}")
+    print(f"Génération de {num_parallel_chains} chaînes parallèles de {num_transactions_per_chain} additions...")
 
-    # 6. Save transactions
+    for chain_id in range(num_parallel_chains):
+        # Initialisation d'une nouvelle chaîne indépendante
+        # 1. Création des deux sources primaires pour cette chaîne
+        current_sources = [RIDManager.generate(), RIDManager.generate()]
+
+        for rid in current_sources:
+            val = random.randint(1, 100)
+            StorageManager.save_file(rid, str(val))
+
+        # 2. Génération des transactions pour cette chaîne
+        for i in range(num_transactions_per_chain):
+            func_type = FunctionType.ADD
+            current_dests = [RIDManager.generate(), RIDManager.generate()]
+
+            tx = {
+                "id": RIDManager.generate(),
+                "chain_id": chain_id + 1,  # Optionnel : pour faciliter le débogage
+                "function": func_type.value,
+                "sources": current_sources,
+                "destination": current_dests
+            }
+            all_transactions.append(tx)
+
+            # Les sorties deviennent les entrées du prochain maillon de la chaîne
+            current_sources = current_dests
+
+    # 3. Sauvegarde finale
     with open(output_file, 'w') as f:
-        json.dump(transactions, f, indent=4)
-    
-    print(f"Successfully generated {num_transactions} transactions in '{output_file}'")
+        json.dump(all_transactions, f, indent=4)
+
+    total_tx = len(all_transactions)
+    print(
+        f"Succès : {total_tx} transactions générées ({num_parallel_chains} chaînes de {num_transactions_per_chain}) dans '{output_file}'")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate random transactions and calculation graphs.")
-    parser.add_argument("count", type=int, help="Number of transactions to generate")
-    parser.add_argument("--output", type=str, default="transactions.json", help="Output JSON file")
-    
+    parser = argparse.ArgumentParser(description="Génère plusieurs chaînes parallèles d'additions séquentielles.")
+    parser.add_argument("count", type=int, help="Nombre de transactions PAR chaîne")
+    parser.add_argument("-p", "--parallel", type=int, default=1, help="Nombre de chaînes de calcul parallèles")
+    parser.add_argument("--output", type=str, default="transactions.json", help="Fichier JSON de sortie")
+
     args = parser.parse_args()
-    generate_transactions(args.count, args.output)
+    generate_transactions(args.count, args.parallel, args.output)

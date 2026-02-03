@@ -1,3 +1,3 @@
 #!/bin/bash
-./generate_transactions.py 10
+./generate_transactions.py 100 -p 3
 ./main.py transactions.json
