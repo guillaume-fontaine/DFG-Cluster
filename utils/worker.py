@@ -8,6 +8,9 @@ from config import TMP_DIR
 from models.operation_node import OperationNode, FunctionType
 from utils.storage_manager import StorageManager
 
+def log(message):
+    print(f"[worker.py] {message}")
+
 class WorkerExecutor:
     @staticmethod
     def execute(node: OperationNode, lock=None) -> Dict[str, Any]:
@@ -36,7 +39,7 @@ class WorkerExecutor:
                         f.write(content)
                     src_paths.append(tmp_path)
                 except FileNotFoundError:
-                    print(f"Error: Source RID {src_rid} not found.")
+                    log(f"Error: Source RID {src_rid} not found.")
                     return None
 
             dest_paths = []
@@ -49,7 +52,7 @@ class WorkerExecutor:
             script_path = os.path.join(os.getcwd(), "scripts", script_name)
 
             if not os.path.exists(script_path):
-                print(f"Error: Script {script_path} not found.")
+                log(f"Error: Script {script_path} not found.")
                 return None
 
             # 3. Construct command
@@ -60,7 +63,7 @@ class WorkerExecutor:
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError as e:
-                print(f"Error executing script: {e}")
+                log(f"Error executing script: {e}")
                 return None
             end_time = time.time()
 
@@ -77,7 +80,7 @@ class WorkerExecutor:
                     file_hash = StorageManager.save_file(dest_rid, content, lock=lock)
                     dest_hashes[dest_rid] = file_hash
                 else:
-                    print(f"Warning: Destination file {tmp_path} was not created.")
+                    log(f"Warning: Destination file {tmp_path} was not created.")
 
             # Return ledger info
             return {

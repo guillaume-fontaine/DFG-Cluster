@@ -6,6 +6,12 @@ from models.operation_node import OperationNode
 from utils.worker import WorkerExecutor
 from utils.storage_manager import StorageManager
 
+def log(message, worker_name=None):
+    prefix = f"[cluster.py]"
+    if worker_name:
+        prefix += f" [{worker_name}]"
+    print(f"{prefix} {message}")
+
 class ClusterWorker(multiprocessing.Process):
     def __init__(self, task_queue, result_queue, registry_lock, ledger_lock):
         super().__init__()
@@ -22,6 +28,7 @@ class ClusterWorker(multiprocessing.Process):
                 break
             
             # Execute task
+            # log(f"Executing task {task.id}", self.name)
             result = WorkerExecutor.execute(task, lock=self.registry_lock)
             
             if result:
@@ -178,7 +185,7 @@ class ClusterMaster:
                 # But we still need to decrement total_tasks or handle it to avoid infinite loop.
                 # Let's assume we just count it as "processed" but don't unlock dependents.
                 # Or better, just break/raise error.
-                print("A task failed execution.")
+                log("A task failed execution.")
                 # If we break, we leave the process hanging.
                 # Let's just count it as completed for the loop, but dependents won't run.
                 # Actually, if we don't add it to completed_tasks, we loop forever.
@@ -201,7 +208,7 @@ class ClusterMaster:
                 if not task_deps[dependent_id]:
                     # Find the task object
                     task_obj = next(t for t in tasks if t.id == dependent_id)
-                    print(f"DEBUG: Dependencies satisfied for {dependent_id}. Submitting.")
+                    log(f"DEBUG: Dependencies satisfied for {dependent_id}. Submitting.")
                     self.task_queue.put(task_obj)
                     submitted_tasks.add(dependent_id)
 
