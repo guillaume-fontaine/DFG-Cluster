@@ -4,6 +4,9 @@ import os
 from typing import Dict, Optional
 from config import STORE_DIR, REGISTRY_FILE, LEDGER_DIR
 
+def log(message):
+    print(f"[storage_manager.py] {message}")
+
 class StorageManager:
     _registry: Dict[str, str] = {}
 
@@ -78,10 +81,12 @@ class StorageManager:
             
         file_hash = cls._registry.get(rid)
         if not file_hash:
+            # log(f"No file found for RID: {rid}")
             raise FileNotFoundError(f"No file found for RID: {rid}")
             
         file_path = os.path.join(STORE_DIR, file_hash)
         if not os.path.exists(file_path):
+             # log(f"Physical file missing for hash: {file_hash}")
              raise FileNotFoundError(f"Physical file missing for hash: {file_hash}")
              
         with open(file_path, 'r') as f:

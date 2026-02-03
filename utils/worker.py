@@ -8,6 +8,9 @@ from config import TMP_DIR
 from models.operation_node import OperationNode, FunctionType
 from utils.storage_manager import StorageManager
 
+def log(message):
+    print(f"[worker.py] {message}")
+
 class WorkerExecutor:
     @staticmethod
     def execute(node: OperationNode, lock=None) -> Dict[str, Any]:
@@ -21,7 +24,7 @@ class WorkerExecutor:
         
         src_paths = []
         src_hashes = {}
-        
+
         try:
             for src_rid in node.sources:
                 try:
@@ -29,14 +32,14 @@ class WorkerExecutor:
                     content = StorageManager.get_file_content(src_rid)
                     src_hash = StorageManager.get_hash(src_rid)
                     src_hashes[src_rid] = src_hash
-                    
+
                     # Write to /tmp/[TASK_ID]/[RID]
                     tmp_path = os.path.join(task_tmp_dir, src_rid)
                     with open(tmp_path, 'w') as f:
                         f.write(content)
                     src_paths.append(tmp_path)
                 except FileNotFoundError:
-                    print(f"Error: Source RID {src_rid} not found.")
+                    log(f"Error: Source RID {src_rid} not found.")
                     return None
 
             dest_paths = []
@@ -47,20 +50,20 @@ class WorkerExecutor:
             # 2. Determine script to run
             script_name = node.function.value.lower() + ".py"
             script_path = os.path.join(os.getcwd(), "scripts", script_name)
-            
+
             if not os.path.exists(script_path):
-                print(f"Error: Script {script_path} not found.")
+                log(f"Error: Script {script_path} not found.")
                 return None
 
             # 3. Construct command
             cmd = [sys.executable, script_path] + src_paths + ["-"] + dest_paths
-            
+
             # 4. Execute
             start_time = time.time()
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError as e:
-                print(f"Error executing script: {e}")
+                log(f"Error executing script: {e}")
                 return None
             end_time = time.time()
 
@@ -71,13 +74,13 @@ class WorkerExecutor:
                 if os.path.exists(tmp_path):
                     with open(tmp_path, 'r') as f:
                         content = f.read()
-                    
+
                     # Save to storage (hashes and updates registry)
                     # Pass the lock here!
                     file_hash = StorageManager.save_file(dest_rid, content, lock=lock)
                     dest_hashes[dest_rid] = file_hash
                 else:
-                    print(f"Warning: Destination file {tmp_path} was not created.")
+                    log(f"Warning: Destination file {tmp_path} was not created.")
 
             # Return ledger info
             return {
@@ -88,7 +91,7 @@ class WorkerExecutor:
                 "timestamp_start": start_time,
                 "timestamp_end": end_time
             }
-            
+
         finally:
             # Clean up the entire task directory
             if os.path.exists(task_tmp_dir):
