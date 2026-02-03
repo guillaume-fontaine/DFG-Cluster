@@ -31,7 +31,7 @@ class RIDManager:
             cls._load_vault()
         
         while True:
-            rid = ''.join(random.choices(string.ascii_letters + string.digits, k=N))
+            rid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=N))
             if rid not in cls._vault:
                 cls._vault.add(rid)
                 cls._save_vault()
